@@ -1,0 +1,372 @@
+import pickle
+import torch 
+import torch.nn as nn
+import torch.nn.functional as F
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from torch.utils.data import Dataset, DataLoader
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+dir = '/content/drive/My Drive/Colab Notebooks/'
+with open(dir+'FordA_TRAIN_x.pickle', 'rb') as f:
+    X = pickle.load(f) 
+with open(dir+'FordA_TRAIN_y.pickle', 'rb') as f:
+    y = pickle.load(f) 
+with open(dir+'FordA_TEST_x.pickle', 'rb') as f:
+    X_test = pickle.load(f) 
+
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size = 0.2, shuffle=True)
+
+for i in range(13):
+    output = X_train[:,:,:]
+    plt.plot(range(output.shape[1]), output[i]);plt.show()
+
+class TSDataset(Dataset):
+    def __init__(self, X, y=None):
+        _, n_length, n_dim = X.shape
+        X_reshape = X.reshape(-1, n_dim)
+        scaler = StandardScaler()
+        X_reshape = scaler.fit_transform(X_reshape)
+        X_reshape = X_reshape.reshape(-1, n_length, n_dim)
+        X = X_reshape
+        
+        self.x = torch.from_numpy(X)        
+        if y is None:
+            self.y = torch.zeros(len(self.x))
+        else:
+            self.y = torch.from_numpy(y)
+    
+    def __getitem__(self, index):
+        return self.x[index], self.y[index]
+    
+    def __len__(self):
+        return self.x.shape[0]
+
+# Hyper-parameters
+hidden_size = 50
+num_layers = 8
+batch_size = 100
+n_epochs = 100
+learning_rate = 0.001
+
+train_loader = torch.utils.data.DataLoader(dataset=TSDataset(X_train, y_train),
+                                           batch_size=batch_size,
+                                           shuffle=True)
+val_loader = torch.utils.data.DataLoader(dataset=TSDataset(X_val, y_val),
+                                           batch_size=batch_size,
+                                           shuffle=False)
+test_loader = torch.utils.data.DataLoader(dataset=TSDataset(X_test),
+                                           batch_size=batch_size,
+                                           shuffle=False)
+_, n_length, n_dim = X_train.shape
+n_classes = len(set(y_train))
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+
+class FC(nn.Module):
+    def __init__(self, input_size, hidden_size, input_length, num_classes):
+        super(FC, self).__init__()
+        
+        self.fc1 = nn.Linear(input_size*input_length, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, num_classes)
+            
+    def forward(self, x):        
+        z = self.fc1(x.view(x.shape[0],-1))
+        z = F.relu(z)
+        z = self.fc2(z)
+        z = F.relu(z)
+        out = self.fc3(z)
+                
+        return out
+
+class RNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes):
+        super(RNN, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        self.rnn = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, num_classes)
+    
+    def forward(self, x):        
+        # RNN
+        z, _ = self.rnn(x)
+        
+        # Fully connected
+        out = self.fc(z[:, -1, :])
+        out = F.relu(out)
+        out = self.fc2(out)
+        
+        return out
+
+def get_padding(kernel_size):
+    #for zero padding    
+    #even
+    if (kernel_size % 2) == 0:
+        left_padding = kernel_size//2
+        right_padding = kernel_size//2 - 1
+    #odd
+    else:
+        left_padding = kernel_size//2
+        right_padding = kernel_size//2
+        
+    return left_padding, right_padding
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(ResidualBlock, self).__init__()
+                
+        left_padding, right_padding = get_padding(kernel_size=8)
+        self.pad1 = nn.ConstantPad1d((left_padding, right_padding), 0)
+        self.conv1 = nn.Conv1d(input_size, hidden_size, kernel_size=8)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.relu1 = nn.ReLU()
+        
+        left_padding, right_padding = get_padding(kernel_size=5)
+        self.pad2 = nn.ConstantPad1d((left_padding, right_padding), 0)
+        self.conv2 = nn.Conv1d(hidden_size, hidden_size, kernel_size=5)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
+        self.relu2 = nn.ReLU()
+        
+        left_padding, right_padding = get_padding(kernel_size=3)
+        self.pad3 = nn.ConstantPad1d((left_padding, right_padding), 0)
+        self.conv3 = nn.Conv1d(hidden_size, hidden_size, kernel_size=3)
+        self.bn3 = nn.BatchNorm1d(hidden_size)
+                
+        self.conv1x1 = nn.Conv1d(input_size, hidden_size, kernel_size=1)
+        self.relu3 = nn.ReLU()
+        
+
+    def forward(self, x):
+        
+        z = self.pad1(x)        
+        z = self.conv1(z)
+        z = self.bn1(z)
+        z = self.relu1(z)
+        
+        z = self.pad2(z)
+        z = self.conv2(z)
+        z = self.bn2(z)
+        z = self.relu2(z)
+        
+        z = self.pad3(z)
+        z = self.conv3(z)
+        z = self.bn3(z)
+        
+        z = z + self.conv1x1(x)
+        z = self.relu3(z)
+        
+        return z
+
+
+class ResNet(nn.Module):
+    def __init__(self, input_size, output_size, input_length):
+        super(ResNet, self).__init__()
+        
+        # residual blocks
+        self.residual_blocks = nn.ModuleList()
+        
+        residual_block = ResidualBlock(input_size=1, hidden_size=64)
+        self.residual_blocks.append(residual_block)
+        
+        residual_block = ResidualBlock(input_size=64, hidden_size=128)
+        self.residual_blocks.append(residual_block)
+        
+        residual_block = ResidualBlock(input_size=128, hidden_size=128)
+        self.residual_blocks.append(residual_block)
+        
+        # pooling layer
+        self.avg_pooling = nn.AvgPool1d(input_length)
+        
+        # for softmax
+        self.linear = nn.Linear(in_features=128, out_features=output_size)
+        
+        self.dropout = nn.Dropout()
+        
+    def forward(self, x):
+                    
+        # (batch, length, dim) -> (batch, dim, length)
+        z = x.transpose(1,2)
+        
+        # resudial blocks
+        for residual_block in self.residual_blocks:
+            z = residual_block(z)
+            
+        # GAP, (batch, dim, length) -> (batch, dim)
+        z = self.avg_pooling(z)        
+        z = z.squeeze(2)
+        
+        # logit
+        #z = self.dropout(z)        
+        outputs = self.linear(z)
+                
+        return outputs
+
+class ConvBlock_NotPadding(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super(ConvBlock_NotPadding, self).__init__()
+                
+        self.conv1 = nn.Conv1d(input_size, hidden_size, kernel_size=8, stride=2)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.relu1 = nn.ReLU()
+        
+        self.conv2 = nn.Conv1d(hidden_size, hidden_size, kernel_size=5)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
+        self.relu2 = nn.ReLU()
+        
+        self.conv3 = nn.Conv1d(hidden_size, hidden_size, kernel_size=3)
+        self.bn3 = nn.BatchNorm1d(hidden_size)
+        self.relu3 = nn.ReLU()
+        
+
+    def forward(self, x):
+        
+        z = self.conv1(x)
+        z = self.bn1(z)
+        z = self.relu1(z)
+        
+        z = self.conv2(z)
+        z = self.bn2(z)
+        z = self.relu2(z)
+        
+        z = self.conv3(z)
+        z = self.bn3(z)        
+        z = self.relu3(z)
+        
+        return z
+
+
+class Conv_LSTM(nn.Module):
+    def __init__(self, input_size, output_size):
+        super(Conv_LSTM, self).__init__()
+        
+        # residual blocks
+        self.conv_blocks = nn.ModuleList()
+        
+        conv_block = ConvBlock_NotPadding(input_size=1, hidden_size=64)
+        self.conv_blocks.append(conv_block)
+        
+        conv_block = ConvBlock_NotPadding(input_size=64, hidden_size=128)
+        self.conv_blocks.append(conv_block)
+        
+        conv_block = ConvBlock_NotPadding(input_size=128, hidden_size=128)
+        self.conv_blocks.append(conv_block)
+                
+        self.rnn = nn.LSTM(128, 32, 2, batch_first=True, dropout=0.2)
+        self.fc = nn.Linear(32, 32)
+        self.fc2 = nn.Linear(32, output_size)
+                
+    def forward(self, x):
+                    
+        # (batch, length, dim) -> (batch, dim, length)
+        z = x.transpose(1,2)
+        
+        # conv_block
+        for conv_block in self.conv_blocks:
+            z = conv_block(z)
+        print(z.size())
+        
+        # RNN
+        # (batch, dim, length) -> (batch, length, dim)
+        z = z.transpose(1,2)        
+        z, _ = self.rnn(z)
+        
+        # Fully connected
+        outputs = self.fc(z[:, -1, :])
+        outputs = F.relu(outputs)
+        outputs = self.fc2(outputs)
+                        
+        return outputs
+
+sequence_length = n_length
+input_size = n_dim
+num_classes = n_classes
+
+model = RNN(input_size, hidden_size, num_layers, num_classes).to(device)
+#model = FC(input_size, hidden_size, sequence_length, num_classes).to(device)
+#model = ResNet(input_size, num_classes, sequence_length).to(device)
+#model = Conv_LSTM(input_size, num_classes).to(device)
+
+criterion = nn.CrossEntropyLoss().to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+for epoch in range(n_epochs):
+    model.train()
+    correct = 0
+    total = 0
+    for i, (X, y) in enumerate(train_loader):
+        X = X.to(device).float()
+        y = y.to(device).long()
+
+        # Forward pass
+        y_pred = model(X)
+        loss = criterion(y_pred, y)
+            
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        with torch.no_grad():
+            correct += (y_pred.max(dim=1)[1]==y).float().sum()
+            total += len(y_pred)  
+    print ('Epoch [{}/{}], Loss: {:.4f}'.format(epoch+1, n_epochs, loss.item()))     
+    print ('Epoch [{}/{}], Accuracy: {:.4f}'.format(epoch+1, n_epochs, correct/total))     
+
+    model.eval()
+    with torch.no_grad():
+        correct = 0
+        total = 0
+        for i, (X, y) in enumerate(val_loader):
+            X = X.to(device).float()
+            y = y.to(device).long()
+
+            # Forward pass
+            y_pred = model(X)
+
+            correct += (y_pred.max(dim=1)[1]==y).float().sum()
+            total += len(y_pred)  
+        print ('Epoch [{}/{}], Accuracy: {:.4f}'.format(epoch+1, n_epochs, correct/total))              
+
+ans = []
+model.eval()
+with torch.no_grad():
+    correct = 0
+    total = 0
+    for i, (X, y) in enumerate(test_loader):
+        X = X.to(device).float()
+
+        # Forward pass
+        y_pred = model(X)
+        ans.append(y_pred) 
+
+ans2 = torch.cat(ans,dim=0)
+
+y = ans2.max(dim=1)[1]
+
+y = y.detach().cpu().numpy()
+
+import pandas as pd 
+pd.DataFrame(y,columns =['Category']).to_csv("sample.csv",index_label='Id')
+
+
+
+
+
+
+
+
+
+
+
