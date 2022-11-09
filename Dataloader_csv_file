@@ -1,0 +1,53 @@
+Dataset : csv파일을 이용하여 사용자 정의 데이터셋 만들기
+사용자가 직접 정의한 Dataset 클래스는 반드시 init, len, getitem 3개 함수를 구현해야 한다.
+
+class CustomDataset(Dataset):
+	def __init__(self):
+	# 생성자, 데이터를 전처리 하는 부분	
+
+	def __len__(self):
+	# 데이터셋의 총 길이를 반환하는 부분	
+
+	def __getitem__(self,idx):
+	# idx(인덱스)에 해당하는 입출력 데이터를 반환한다.
+다음은 판다스를 이용하여 csv파일을 불러오고, 불러온 파일에 맞춰서 3개 함수를 구현하는 코드이다. 이 부분을 수정하여 Train 전용으로 데이터 셋을 추출하거나, Prediction 전용으로 데이터 셋을 추출할 수 있다.
+
+import pandas as pd
+
+class CustomDataset(Dataset):
+	def __init__(self, csv_path):
+		df = pd.read_csv(csv_path)
+		# df.shape : (1314,16)
+		
+		# df.iloc을 통해 슬라이싱 하는 과정 혹은 reshapes하는 과정은 csv 파일의 구성에 따라 다르다.
+		# 해당 데이터는 2번째 index부터 parameters이고,
+		# 1번째 index가 label이기에 다음처럼 코드를 구성하였다.
+		self.inp = df.iloc[:, 2:].values
+		self.outp = df.iloc[:,1].values.reshapes(1314,1)
+	
+	def __len__(self):
+		# 가지고 있는 데이터셋의 길이를 반환한다.
+		return len(self.inp) # 1314
+
+	def __getitem__(self,idx):
+		inp = torch.FloatTensor(self.inp[idx])
+		outp = torch.FloatTensor(self.outp[idx])
+		return inp, outp # 해당하는 idx(인덱스)의 input과 output 데이터를 반환한다.
+DataLoader를 활용하여 Dataset 사용하기
+개인적인 생각으로는 사용자가 함수를 지정하여 커스텀으로 자신만의 Dataset을 만들면, DataLoader는 Dataset의 함수인 len, getitem 등 함수를 이용하여 원하는 index에 접근하거나 iterator 형식으로 데이터를 쉽게 순회할 수 있도록 도와주는 것 같다. 또한 더욱 손쉽게 batch_size나 shuffle 유무를 설정할 수 있다.
+
+다음은 csv_path를 이용하여 CustomDataset을 생성하고, DataLoader를 활용하는 코드이다.
+
+# 본인의 환경에 맞춰서 csv 경로를 입력하면 된다.
+CSV_PATH = './test.csv'
+EPOCHS = 20
+
+dataset = CustomDataset(CSV_PATH)
+dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+
+for epoch in range(EPOCHS + 1):
+	for batch_idx, samples in enumerate(dataloader):
+		x_train, y_train = samples.values()
+이렇게 x_train, y_train을 batch_size에 맞춰서 불러왔으니, 이를 이용해서 train을 하거나 predict를 하면된다.
+
+이외에도 필요한 옵션 등이 있다면 적극적으로 pytorch docs를 활용하자.
